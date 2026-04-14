@@ -178,6 +178,8 @@ class SweepSettings : PersistentStateComponent<SweepSettings> {
 
     var autocompleteLocalMode: Boolean = false
 
+    var autocompleteLocalMlx: Boolean = false
+
     var autocompleteLocalPort: Int = 8081
 
     fun ensureDefaultPromptsInitialized() {

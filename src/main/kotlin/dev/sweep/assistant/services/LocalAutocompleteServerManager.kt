@@ -10,6 +10,9 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindowManager
 import dev.sweep.assistant.agent.tools.TerminalApiWrapper
 import dev.sweep.assistant.settings.SweepSettings
+import dev.sweep.assistant.utils.SweepConstants
+import com.intellij.ide.plugins.PluginManagerCore
+import com.intellij.openapi.extensions.PluginId
 import kotlinx.coroutines.*
 import org.jetbrains.plugins.terminal.TerminalToolWindowFactory
 import org.jetbrains.plugins.terminal.TerminalToolWindowManager
@@ -130,8 +133,35 @@ class LocalAutocompleteServerManager : Disposable {
 
     private val isWindows = System.getProperty("os.name").lowercase().contains("win")
 
-    private fun buildUvxCommand(uvxPath: String, port: Int): List<String> =
-        if (isWindows) {
+    /**
+     * Resolves the path to a bundled Python package inside the plugin directory.
+     * Returns the path if found, null otherwise.
+     */
+    private fun getBundledPackagePath(packageDirName: String): String? {
+        val pluginId = PluginId.getId(SweepConstants.PLUGIN_ID)
+        val plugin = PluginManagerCore.getPlugin(pluginId) ?: return null
+        val pluginPath = plugin.pluginPath ?: return null
+        val pkgPath = pluginPath.resolve(packageDirName)
+        return if (pkgPath.toFile().exists()) pkgPath.toString() else null
+    }
+
+    private fun buildUvxCommand(uvxPath: String, port: Int): List<String> {
+        val useMlx = SweepSettings.getInstance().autocompleteLocalMlx
+
+        if (useMlx) {
+            val mlxPath = getBundledPackagePath("sweep-autocomplete-mlx")
+            if (mlxPath != null) {
+                return listOf(
+                    uvxPath,
+                    "--from", mlxPath,
+                    "sweep-autocomplete-mlx",
+                    "--port", port.toString(),
+                )
+            }
+            logger.warn("MLX package not found at plugin path, falling back to default GGUF")
+        }
+
+        return if (isWindows) {
             listOf(
                 uvxPath,
                 "--python", "3.12",
@@ -142,6 +172,7 @@ class LocalAutocompleteServerManager : Disposable {
         } else {
             listOf(uvxPath, "sweep-autocomplete", "--port", port.toString())
         }
+    }
 
     private fun startServerProcess(uvxPath: String, onStatus: ((String) -> Unit)? = null) {
         val port = getPort()
@@ -351,7 +382,9 @@ class LocalAutocompleteServerManager : Disposable {
                 return null
             }
         }
-        return buildUvxCommand(uvxPath, getPort()).joinToString(" ")
+        return buildUvxCommand(uvxPath, getPort()).joinToString(" ") { arg ->
+            if (arg.contains(" ")) "\"$arg\"" else arg
+        }
     }
 
     /**
@@ -372,7 +405,9 @@ class LocalAutocompleteServerManager : Disposable {
                     .getToolWindow(TerminalToolWindowFactory.TOOL_WINDOW_ID) ?: return@invokeLater
 
                 // Reuse existing terminal tab if one exists, otherwise create a new one
-                val existingContent = toolWindow.contentManager.findContent(TERMINAL_TAB_NAME)
+                val existingContent = toolWindow.contentManager.contents.firstOrNull {
+                    it.displayName == TERMINAL_TAB_NAME
+                }
                 val widget = if (existingContent != null) {
                     TerminalToolWindowManager.findWidgetByContent(existingContent)
                 } else {

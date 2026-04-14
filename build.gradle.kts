@@ -130,9 +130,24 @@ tasks {
         }
     }
 
+    val copyBundledPackagesToSandbox by creating(Copy::class) {
+        val sandboxPluginDir =
+            layout.buildDirectory
+                .dir("idea-sandbox/plugins/${project.name}")
+
+        from("vendor/sweep-autocomplete-mlx") {
+            into("sweep-autocomplete-mlx")
+        }
+        into(sandboxPluginDir)
+
+        doLast {
+            println("Copied bundled Python packages to sandbox")
+        }
+    }
+
     // Hook the copy task to prepareSandbox
     prepareSandbox {
-        finalizedBy(copyRipgrepToSandbox)
+        finalizedBy(copyRipgrepToSandbox, copyBundledPackagesToSandbox)
     }
 
     buildPlugin {
@@ -142,6 +157,11 @@ tasks {
         from("src/main/resources") {
             include("tools/ripgrep/**")
             into("lib/tools")
+        }
+
+        // Include bundled MLX autocomplete Python package
+        from("vendor/sweep-autocomplete-mlx") {
+            into("sweep-autocomplete-mlx")
         }
     }
 

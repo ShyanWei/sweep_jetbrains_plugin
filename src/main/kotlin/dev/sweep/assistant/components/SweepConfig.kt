@@ -1041,6 +1041,12 @@ class SweepConfig(
         SweepSettings.getInstance().autocompleteLocalMode = enabled
     }
 
+    fun isAutocompleteLocalMlx(): Boolean = SweepSettings.getInstance().autocompleteLocalMlx
+
+    fun updateAutocompleteLocalMlx(enabled: Boolean) {
+        SweepSettings.getInstance().autocompleteLocalMlx = enabled
+    }
+
     fun getAutocompleteLocalPort(): Int = SweepSettings.getInstance().autocompleteLocalPort
 
     fun updateAutocompleteLocalPort(port: Int) {
@@ -4836,6 +4842,28 @@ class SweepConfig(
                                         border = JBUI.Borders.emptyLeft(24)
                                     },
                                 )
+                                if (System.getProperty("os.name").lowercase().contains("mac")) {
+                                    add(Box.createRigidArea(Dimension(0, 4.scaled)))
+                                    add(
+                                        JCheckBox("Use MLX runtime for NES model").apply {
+                                            isSelected = isAutocompleteLocalMlx()
+                                            withSweepFont(project)
+                                            border = JBUI.Borders.emptyLeft(24)
+                                            addActionListener {
+                                                updateAutocompleteLocalMlx(isSelected)
+                                            }
+                                        },
+                                    )
+                                    add(Box.createRigidArea(Dimension(0, 2.scaled)))
+                                    add(
+                                        JLabel("Uses MLX for faster inference on Apple Silicon (requires macOS + mlx-lm).").apply {
+                                            withSweepFont(project, scale = 0.85f)
+                                            foreground = JBColor.GRAY
+                                            font = font.deriveFont(Font.ITALIC)
+                                            border = JBUI.Borders.emptyLeft(48)
+                                        },
+                                    )
+                                }
                             },
                             gbc,
                         )
