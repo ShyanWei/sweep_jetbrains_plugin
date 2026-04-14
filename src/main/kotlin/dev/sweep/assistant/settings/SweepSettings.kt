@@ -176,9 +176,13 @@ class SweepSettings : PersistentStateComponent<SweepSettings> {
             // Don't notify settings changed for BYOK to avoid excessive chatter
         }
 
-    var autocompleteLocalMode: Boolean = false
+    var autocompleteLocalMode: Boolean = true
 
     var autocompleteLocalMlx: Boolean = false
+
+    var autocompleteLocalNativeEngine: Boolean = true
+
+    var autocompleteLocalModel: String = "sweep-0.5B"
 
     var autocompleteLocalPort: Int = 8081
 

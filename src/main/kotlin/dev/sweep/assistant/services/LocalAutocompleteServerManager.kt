@@ -364,11 +364,152 @@ class LocalAutocompleteServerManager : Disposable {
         startServer()
     }
 
+    // --- llama-server support for native engine ---
+
+    private fun getSelectedModel(): dev.sweep.assistant.autocomplete.edit.engine.NesModel {
+        val modelId = SweepSettings.getInstance().autocompleteLocalModel
+        return dev.sweep.assistant.autocomplete.edit.engine.NesModelConfig.getModel(modelId)
+    }
+
+    /**
+     * Resolve llama-server binary on PATH.
+     */
+    private fun resolveLlamaServer(): String? {
+        val envPath = try {
+            val env = com.intellij.util.EnvironmentUtil.getEnvironmentMap()
+            if (env.isNotEmpty()) env["PATH"] else System.getenv("PATH")
+        } catch (_: Throwable) {
+            System.getenv("PATH")
+        }
+
+        val exeName = if (isWindows) "llama-server.exe" else "llama-server"
+        if (!envPath.isNullOrEmpty()) {
+            for (dir in envPath.split(File.pathSeparatorChar)) {
+                if (dir.isEmpty()) continue
+                val cand = File(dir, exeName)
+                if (cand.isFile && cand.canExecute()) return cand.absolutePath
+            }
+        }
+
+        // Check common locations
+        val commonPaths = listOf(
+            "/opt/homebrew/bin/llama-server",
+            "/usr/local/bin/llama-server",
+            System.getProperty("user.home") + "/.local/bin/llama-server",
+        )
+        for (path in commonPaths) {
+            val f = File(path)
+            if (f.isFile && f.canExecute()) return f.absolutePath
+        }
+
+        return null
+    }
+
+    /**
+     * Resolve the GGUF model path.
+     * Checks: 1) HuggingFace cache, 2) Sweep models cache (~/.cache/sweep/models/).
+     * Returns the path to the .gguf file, or null if not cached yet.
+     */
+    private fun resolveModelPath(): String? {
+        val model = getSelectedModel()
+
+        // Check HuggingFace cache
+        val hfCacheBase = File(System.getProperty("user.home"), ".cache/huggingface/hub")
+        val modelDir = File(hfCacheBase, "models--${model.repo.replace("/", "--")}")
+        if (modelDir.isDirectory) {
+            val snapshotsDir = File(modelDir, "snapshots")
+            if (snapshotsDir.isDirectory) {
+                val snapshots = snapshotsDir.listFiles()?.filter { it.isDirectory } ?: emptyList()
+                for (snapshot in snapshots) {
+                    val gguf = File(snapshot, model.filename)
+                    if (gguf.isFile) return gguf.absolutePath
+                }
+            }
+        }
+
+        // Check Sweep models cache
+        val sweepCache = File(System.getProperty("user.home"), ".cache/sweep/models/${model.filename}")
+        if (sweepCache.isFile) return sweepCache.absolutePath
+
+        return null
+    }
+
+    private val SWEEP_MODELS_DIR = System.getProperty("user.home") + "/.cache/sweep/models"
+
+    /**
+     * Build a shell command to download the model.
+     * Tries hf first, falls back to curl.
+     */
+    private fun buildModelDownloadCommand(): String {
+        val model = getSelectedModel()
+        val hfCliCmd = "hf download ${model.repo} ${model.filename}"
+        val url = "https://huggingface.co/${model.repo}/resolve/main/${model.filename}"
+        val destDir = SWEEP_MODELS_DIR
+        val destFile = "$destDir/${model.filename}"
+        val curlCmd = "mkdir -p $destDir && curl -L -o \"$destFile\" \"$url\""
+
+        // Shell one-liner: try hf, fall back to curl
+        return "if command -v hf >/dev/null 2>&1; then $hfCliCmd; else echo 'hf not found, downloading with curl...' && $curlCmd; fi"
+    }
+
+    /**
+     * Build the llama-server command with speculative decoding flags.
+     */
+    private fun buildLlamaServerCommand(llamaServerPath: String, modelPath: String, port: Int): List<String> {
+        return listOf(
+            llamaServerPath,
+            "-m", modelPath,
+            "--port", port.toString(),
+            "-ngl", "-1",
+            "--flash-attn", "auto",
+            "--spec-type", "ngram-mod",
+            "--spec-ngram-size-n", "24",
+            "--draft-min", "48",
+            "--draft-max", "64",
+        )
+    }
+
     /**
      * Builds the full command string for starting the server.
-     * Returns null if uvx cannot be found (and uv install also fails).
+     * Uses llama-server when native engine is enabled, otherwise uvx.
      */
     fun getServerCommand(): String? {
+        val useNativeEngine = SweepSettings.getInstance().autocompleteLocalNativeEngine
+        val port = getPort()
+
+        if (useNativeEngine) {
+            val llamaPath = resolveLlamaServer()
+            if (llamaPath == null) {
+                showNotification(
+                    "llama-server not found. Install it with: brew install llama.cpp",
+                    NotificationType.ERROR,
+                )
+                return null
+            }
+
+            val modelPath = resolveModelPath()
+            if (modelPath != null) {
+                return buildLlamaServerCommand(llamaPath, modelPath, port).joinToString(" ") { arg ->
+                    if (arg.contains(" ")) "\"$arg\"" else arg
+                }
+            }
+
+            // Model not downloaded yet — return a command that downloads first, then starts
+            val model = getSelectedModel()
+            val downloadCmd = buildModelDownloadCommand()
+            val repoDirName = model.repo.replace("/", "--")
+            val sweepCachePath = "$SWEEP_MODELS_DIR/${model.filename}"
+            val serverCmd = buildLlamaServerCommand(llamaPath, "\$MODEL_PATH", port)
+                .joinToString(" ") { if (it.contains(" ")) "\"$it\"" else it }
+
+            // After download, find the model in either HF cache or Sweep cache
+            val findModel = "MODEL_PATH=\$(find ~/.cache/huggingface/hub/models--$repoDirName -name '${model.filename}' 2>/dev/null | head -1); " +
+                "[ -z \"\$MODEL_PATH\" ] && MODEL_PATH=\"$sweepCachePath\""
+
+            return "$downloadCmd && $findModel && $serverCmd"
+        }
+
+        // Fall back to uvx path
         var uvxPath = resolveUvx()
         if (uvxPath == null) {
             logger.info("uvx not found, attempting to install uv")
@@ -382,7 +523,7 @@ class LocalAutocompleteServerManager : Disposable {
                 return null
             }
         }
-        return buildUvxCommand(uvxPath, getPort()).joinToString(" ") { arg ->
+        return buildUvxCommand(uvxPath, port).joinToString(" ") { arg ->
             if (arg.contains(" ")) "\"$arg\"" else arg
         }
     }
@@ -437,6 +578,52 @@ class LocalAutocompleteServerManager : Disposable {
                     "Failed to open terminal for local autocomplete server: ${e.message}",
                     NotificationType.ERROR,
                 )
+            }
+        }
+    }
+
+    /**
+     * Restarts the server in the terminal by sending Ctrl+C to the existing tab,
+     * then launching the new command. Used when the model is changed.
+     */
+    fun restartServerInTerminal(project: Project) {
+        val command = getServerCommand() ?: return
+
+        ApplicationManager.getApplication().invokeLater {
+            try {
+                val toolWindow = ToolWindowManager.getInstance(project)
+                    .getToolWindow(TerminalToolWindowFactory.TOOL_WINDOW_ID) ?: return@invokeLater
+
+                val existingContent = toolWindow.contentManager.contents.firstOrNull {
+                    it.displayName == TERMINAL_TAB_NAME
+                }
+                val widget = if (existingContent != null) {
+                    TerminalToolWindowManager.findWidgetByContent(existingContent)
+                } else {
+                    null
+                }
+
+                if (widget != null) {
+                    // Send Ctrl+C to stop the running server, then start new one
+                    ApplicationManager.getApplication().executeOnPooledThread {
+                        val isPowerShell = TerminalApiWrapper.isPowerShell(project)
+                        ApplicationManager.getApplication().invokeLater {
+                            // Send Ctrl+C
+                            TerminalApiWrapper.sendCommand(widget, "\u0003", project, isPowerShell)
+                        }
+                        // Wait for the server to stop
+                        Thread.sleep(1500)
+                        ApplicationManager.getApplication().invokeLater {
+                            TerminalApiWrapper.sendCommand(widget, command, project, isPowerShell)
+                        }
+                    }
+                    logger.info("Restarting local autocomplete server with: $command")
+                } else {
+                    // No existing terminal — just start fresh
+                    startServerInTerminal(project)
+                }
+            } catch (e: Exception) {
+                logger.warn("Failed to restart local autocomplete server: ${e.message}")
             }
         }
     }
