@@ -389,8 +389,10 @@ class LocalAutocompleteServerManager : Disposable {
                 // Small delay so the shell is ready to accept input, then send command
                 ApplicationManager.getApplication().executeOnPooledThread {
                     Thread.sleep(1000)
+                    // Compute isPowerShell on BGT to avoid EDT threading violation
+                    val isPowerShell = TerminalApiWrapper.isPowerShell(project)
                     ApplicationManager.getApplication().invokeLater {
-                        TerminalApiWrapper.sendCommand(targetWidget, command, project)
+                        TerminalApiWrapper.sendCommand(targetWidget, command, project, isPowerShell)
                     }
                 }
                 logger.info("Started local autocomplete server in terminal: $command")
